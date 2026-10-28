@@ -11,6 +11,7 @@ export interface Task {
 	is_record: number
 	unsubscribe: number
 	threads: number
+	max_per_minute?: number
 	etypes: string
 	track_open: number
 	track_click: number

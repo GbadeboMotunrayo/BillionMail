@@ -48,6 +48,12 @@ const senderOptions = computed(() => {
 		}))
 })
 
+// Name we filled in from the mailbox. A name the user typed (or a saved task's name)
+// differs from it and must survive sender changes (#376).
+let autoName: string | null = null
+
+const canAutofillName = () => !name.value || name.value === autoName
+
 const handleUpdateDomain = async () => {
 	await nextTick()
 	if (senderOptions.value.length > 0) {
@@ -55,14 +61,18 @@ const handleUpdateDomain = async () => {
 		handleUpdateSender(sender.value, senderOptions.value[0])
 	} else {
 		sender.value = null
-		name.value = ''
+		if (canAutofillName()) {
+			name.value = ''
+			autoName = null
+		}
 	}
 }
 
 const handleUpdateSender = (val: string, option: SelectOption) => {
 	const { data } = option
-	if (isObject<MailBox>(data)) {
+	if (isObject<MailBox>(data) && canAutofillName()) {
 		name.value = data.full_name
+		autoName = data.full_name
 	}
 }
 

@@ -316,6 +316,8 @@
 				"threads": "スレッド数",
 				"threadsAuto": "自動",
 				"threadsCustom": "カスタム",
+				"maxPerMinute": "1分あたりの最大送信数",
+				"maxPerMinutePlaceholder": "0 = 無制限",
 				"sendTime": "送信時間",
 				"sendTimeNow": "今すぐ送信",
 				"sendTimeSchedule": "スケジュール",

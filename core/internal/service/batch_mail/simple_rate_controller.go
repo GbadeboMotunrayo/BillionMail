@@ -16,8 +16,10 @@ type SimpleRateController struct {
 
 	// add field for more precise rate control
 	lastSendTime time.Time // last send time
-	sendTokens   int       // available send tokens
+	sendTokens   int       // available send tokens; negative = reserved ahead by waiting workers
 	burstLimit   int       // allowed burst send limit
+	lastRefill   time.Time // when tokens were last topped up
+	refillCarry  float64   // fractional token left over from the last top-up
 }
 
 // NewSimpleRateController creates a new SimpleRateController with the specified max send rate per minute.
@@ -51,78 +53,69 @@ func NewSimpleRateController(maxPerMinute int) *SimpleRateController {
 		lastSendTime:  time.Now().Add(-waitTime), // ensure first send not need wait
 		sendTokens:    burstLimit,                // initial tokens equal burst limit
 		burstLimit:    burstLimit,
+		lastRefill:    time.Now(),
 	}
 }
 
-// Wait wait for a send interval
+// Wait blocks until the next email may be sent.
+//
+// Token bucket: tokens refill at maxPerMinute, capped at burstLimit. The old version
+// re-added "everything allowed so far this minute" on every call, so tokens refilled
+// many times faster than the limit and campaigns went out all at once (#362).
+// A worker that finds no token reserves the next one (tokens go negative) and sleeps
+// until it is due, so concurrent workers queue up instead of all firing together.
 func (r *SimpleRateController) Wait(ctx context.Context) error {
 	r.mu.Lock()
 
-	// current time and last reset time difference
 	now := time.Now()
-	timeSinceReset := now.Sub(r.lastResetTime)
+	perToken := time.Minute / time.Duration(r.maxPerMinute)
 
-	// check if need reset count
-	if timeSinceReset >= time.Minute {
-		// reset count
+	// the per-minute counter only feeds GetCurrentRate/AdjustRate reporting
+	if now.Sub(r.lastResetTime) >= time.Minute {
 		r.sentInLastMinute = 0
 		r.lastResetTime = now
-
-		// reset tokens
-		r.sendTokens = r.burstLimit
-	} else {
-		// add tokens based on elapsed time
-		elapsedRatio := float64(timeSinceReset) / float64(time.Minute)
-		tokensToAdd := int(float64(r.maxPerMinute)*elapsedRatio) - r.sentInLastMinute
-
-		if tokensToAdd > 0 {
-			// add tokens, but not exceed burst limit
-			r.sendTokens += tokensToAdd
-			if r.sendTokens > r.burstLimit {
-				r.sendTokens = r.burstLimit
-			}
-		}
 	}
 
-	// if have available tokens, return immediately
-	if r.sendTokens > 0 {
-		r.sendTokens--
-		timeSinceLastSend := now.Sub(r.lastSendTime)
-		r.lastSendTime = now
-		r.mu.Unlock()
-
-		// if time since last send too short, sleep briefly to avoid system overload
-		if timeSinceLastSend < time.Millisecond {
-			time.Sleep(time.Millisecond)
+	if elapsed := now.Sub(r.lastRefill); elapsed > 0 {
+		add := elapsed.Minutes()*float64(r.maxPerMinute) + r.refillCarry
+		whole := int(add)
+		r.refillCarry = add - float64(whole)
+		r.sendTokens += whole
+		if r.sendTokens >= r.burstLimit {
+			r.sendTokens = r.burstLimit
+			r.refillCarry = 0
 		}
-
-		return nil
+		r.lastRefill = now
 	}
 
-	// calculate wait time
-	nextSendTime := r.lastSendTime.Add(r.waitTime)
-	waitTime := nextSendTime.Sub(now)
-
-	// already reached send time, no need wait
-	if waitTime <= 0 {
+	r.sendTokens--
+	if r.sendTokens >= 0 {
 		r.lastSendTime = now
 		r.mu.Unlock()
 		return nil
 	}
 
-	// update last send time
-	r.lastSendTime = nextSendTime
+	// Our token is -sendTokens slots away, minus the fraction already accrued
+	deficit := float64(-r.sendTokens) - r.refillCarry
+	waitTime := time.Duration(deficit * float64(perToken))
+	r.lastSendTime = now.Add(waitTime)
 	r.mu.Unlock()
 
-	// use more precise timer to wait
+	if waitTime <= 0 {
+		return nil
+	}
+
 	timer := time.NewTimer(waitTime)
 	defer timer.Stop()
 
 	select {
 	case <-timer.C:
-		// wait completed
 		return nil
 	case <-ctx.Done():
+		// give the reserved slot back
+		r.mu.Lock()
+		r.sendTokens++
+		r.mu.Unlock()
 		return ctx.Err()
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/gogf/gf/v2/errors/gerror"
+	"github.com/gogf/gf/v2/frame/g"
 
 	"billionmail-core/api/mail_boxes/v1"
 	"billionmail-core/internal/service/mail_boxes"
@@ -20,9 +21,24 @@ func (c *ControllerV1) DeleteMailbox(ctx context.Context, req *v1.DeleteMailboxR
 	}
 
 	var validEmails []string
+	deleteBlank := false
 	for _, email := range req.Emails {
 		if email != "" {
 			validEmails = append(validEmails, email)
+		} else {
+			deleteBlank = true
+		}
+	}
+
+	// Old imports could leave rows with an empty username; let them be removed (#378)
+	if deleteBlank {
+		result, blankErr := g.DB().Model("mailbox").Ctx(ctx).Where("username", "").Delete()
+		if blankErr != nil {
+			return nil, blankErr
+		}
+		if n, _ := result.RowsAffected(); n > 0 && len(validEmails) == 0 {
+			res.SetSuccess(fmt.Sprintf("Successfully deleted %d mailbox(es)", n))
+			return
 		}
 	}
 

@@ -332,6 +332,8 @@
 				"threads": "Threads",
 				"threadsAuto": "Auto",
 				"threadsCustom": "Custom",
+				"maxPerMinute": "Max emails per minute",
+				"maxPerMinutePlaceholder": "0 = no limit",
 				"sendTime": "Send time",
 				"sendTimeNow": "Send now",
 				"sendTimeSchedule": "Schedule",

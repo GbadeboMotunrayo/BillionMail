@@ -14,6 +14,7 @@ import (
 	"billionmail-core/internal/service/public"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"github.com/gogf/gf/util/grand"
 	"github.com/gogf/gf/v2/errors/gerror"
@@ -63,40 +64,54 @@ func addOrUpdateContact(email string, groupId int, attribs map[string]string, st
 		return err
 	}
 
-	if g.IsEmpty(contact) {
-		// Insert new contact
-		contact = entity.Contact{
-			Email:   email,
-			GroupId: groupId,
-			Status:  status,
-			Attribs: attribs,
-		}
-		_, err = g.DB().Model("bm_contacts").Data(contact).OmitEmpty().Insert()
-		if err != nil {
-			return err
-		}
+	// Write status explicitly. The old struct insert used OmitEmpty, which dropped
+	// status=0, so the column default (1 on upgraded installs) marked double opt-in
+	// contacts confirmed before they clicked anything (#161).
+	if attribs == nil {
+		attribs = map[string]string{}
 	}
-
-	// Update existing contact
-	contact.Status = status
-	contact.Attribs = attribs
-	_, err = g.DB().Model("bm_contacts").Data(contact).Where("id", contact.Id).Update()
+	attribsJSON, err := json.Marshal(attribs)
 	if err != nil {
 		return err
 	}
 
-	return nil
+	if contact.Id == 0 {
+		_, err = g.DB().Model("bm_contacts").Data(g.Map{
+			"email":    email,
+			"group_id": groupId,
+			"status":   status,
+			"active":   1,
+			"attribs":  string(attribsJSON),
+		}).Insert()
+		return err
+	}
+
+	_, err = g.DB().Model("bm_contacts").Data(g.Map{
+		"status":  status,
+		"active":  1,
+		"attribs": string(attribsJSON),
+	}).Where("id", contact.Id).Update()
+
+	return err
 }
 
 // Update contact status: confirm (0,1), subscribe = 1
 func updateContactStatus(email string, groupId int, status int) error {
-	_, err := g.DB().Model("bm_contacts").
+	result, err := g.DB().Model("bm_contacts").
 		Data(g.Map{"status": status, "active": 1}).
 		Where("email", email).
 		Where("group_id", groupId).
 		Update()
+	if err != nil {
+		return err
+	}
 
-	return err
+	// a confirm that changes nothing must not report success (#161)
+	if n, _ := result.RowsAffected(); n == 0 {
+		return fmt.Errorf("no contact %s in group %d", email, groupId)
+	}
+
+	return nil
 }
 
 func readTemplateFiles(baseFilename string) (htmlContent string, txtContent string, err error) {

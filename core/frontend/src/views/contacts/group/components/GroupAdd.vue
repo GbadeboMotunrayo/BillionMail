@@ -33,6 +33,7 @@
 </template>
 
 <script lang="ts" setup>
+import { readTextFile } from '@/utils'
 import { UploadFileInfo } from 'naive-ui'
 import { useModal } from '@/hooks/modal/useModal'
 import { downloadFile } from '@/api/modules/public'
@@ -69,14 +70,10 @@ example1@example.com,"{""age"": ""13"", ""Gender"": ""XXX""}"
 example2@example.com,"{""age"": ""45"", ""city"": ""XXX""}"
 `
 
-const handleChangeFile = (file: UploadFileInfo) => {
-	const reader = new FileReader()
-	reader.onload = e => {
-		form.file_type = file.name.substring(file.name.lastIndexOf('.') + 1)
-		form.file_data = e.target?.result as string
-	}
+const handleChangeFile = async (file: UploadFileInfo) => {
 	if (file.file) {
-		reader.readAsText(file.file)
+		form.file_type = file.name.substring(file.name.lastIndexOf('.') + 1)
+		form.file_data = await readTextFile(file.file)
 	}
 }
 

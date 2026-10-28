@@ -6,6 +6,7 @@ import (
 	"billionmail-core/internal/service/dockerapi"
 	"billionmail-core/internal/service/public"
 	"context"
+	crand "crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"github.com/gogf/gf/v2/database/gdb"
 	"github.com/gogf/gf/v2/frame/g"
 	"github.com/gogf/gf/v2/util/gconv"
+	"math/big"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -230,14 +232,48 @@ func PasswdMD5Crypt(ctx context.Context, password string) (string, error) {
 }
 
 func generateRandomPassword(charset string, length int) string {
-	if charset == "" {
-		charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	if charset != "" {
+		password := make([]byte, length)
+		for i := range password {
+			password[i] = charset[secureIntn(len(charset))]
+		}
+		return string(password)
 	}
-	password := make([]byte, length)
-	for i := range password {
-		password[i] = charset[rand.Intn(len(charset))]
+	return GenerateStrongPassword(length)
+}
+
+// GenerateStrongPassword returns a random password that always meets the panel's own
+// rule: at least one uppercase letter, one lowercase letter and one digit (#350).
+func GenerateStrongPassword(length int) string {
+	const (
+		lower = "abcdefghijklmnopqrstuvwxyz"
+		upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+		digit = "0123456789"
+	)
+	all := lower + upper + digit
+	var password []byte
+	if length >= 3 {
+		password = []byte{lower[secureIntn(len(lower))], upper[secureIntn(len(upper))], digit[secureIntn(len(digit))]}
 	}
+	for len(password) < length {
+		password = append(password, all[secureIntn(len(all))])
+	}
+
+	// shuffle so the guaranteed characters aren't always first
+	for i := len(password) - 1; i > 0; i-- {
+		j := secureIntn(i + 1)
+		password[i], password[j] = password[j], password[i]
+	}
+
 	return string(password)
+}
+
+func secureIntn(n int) int {
+	v, err := crand.Int(crand.Reader, big.NewInt(int64(n)))
+	if err != nil {
+		return rand.Intn(n)
+	}
+	return int(v.Int64())
 }
 func BatchAdd(ctx context.Context, domain string, quota int, count int, prefix string, quotaActive int) ([]string, error) {
 
@@ -412,6 +448,11 @@ func AddImport(ctx context.Context, mailbox *v1.Mailbox) (err error) {
 	mailbox.LocalPart = strings.ToLower(mailbox.LocalPart)
 	mailbox.Domain = strings.ToLower(mailbox.Domain)
 
+	// A blank or malformed username created rows that could never be deleted (#378)
+	if mailbox.LocalPart == "" || mailbox.Domain == "" || mailbox.Username != mailbox.LocalPart+"@"+mailbox.Domain {
+		return fmt.Errorf("invalid email address %q", mailbox.Username)
+	}
+
 	now := time.Now().Unix()
 	mailbox.CreateTime = now
 	mailbox.UpdateTime = now
@@ -419,9 +460,14 @@ func AddImport(ctx context.Context, mailbox *v1.Mailbox) (err error) {
 	mailbox.QuotaActive = 1
 	mailbox.Maildir = fmt.Sprintf("%s@%s/", mailbox.LocalPart, mailbox.Domain)
 
-	_, err = g.DB().Model("mailbox").Ctx(ctx).InsertIgnore(mailbox)
+	result, err := g.DB().Model("mailbox").Ctx(ctx).InsertIgnore(mailbox)
 	if err != nil {
 		return err
+	}
+
+	// InsertIgnore skips duplicates silently; don't count them as imported
+	if n, _ := result.RowsAffected(); n == 0 {
+		return fmt.Errorf("%s already exists", mailbox.Username)
 	}
 
 	if e2 := ensureMaildirAndQuotaFile(ctx, mailbox); e2 != nil {

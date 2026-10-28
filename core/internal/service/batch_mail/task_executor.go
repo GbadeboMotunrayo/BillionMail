@@ -320,7 +320,8 @@ func (e *TaskExecutor) ProcessTask(ctx context.Context) error {
 	//g.Log().Info(ctx, "task %d: start processing, start time: %s", task.Id, startTime.Format("2006-01-02 15:04:05"))
 
 	// process task
-	if err := e.processTaskRecipients(ctx, task, emailContent); err != nil {
+	processErr := e.processTaskRecipients(ctx, task, emailContent)
+	if err := processErr; err != nil {
 		g.Log().Error(ctx, "failed to process task: %v", err)
 		if errors.Is(err, context.Canceled) {
 			g.Log().Info(ctx, "task %d is canceled", task.Id)
@@ -379,9 +380,11 @@ func (e *TaskExecutor) ProcessTask(ctx context.Context) error {
 		completeMsg := fmt.Sprintf("task %d is successfully marked as completed", task.Id)
 		g.Log().Info(ctx, completeMsg)
 		RemoveTaskExecutor(task.Id) // The executor is removed at the end of the task
+		return nil
 	}
 
-	return nil
+	// Still unfinished: surface why, instead of reporting success (#368)
+	return processErr
 }
 
 // Stop stop task executor
@@ -522,10 +525,7 @@ func (e *TaskExecutor) getTaskIdFromContext(ctx context.Context) (int, error) {
 
 // configureRateController
 func (e *TaskExecutor) configureRateController(task *entity.EmailTask) {
-	maxPerMinute := task.Threads * 20 * 60
-	if maxPerMinute <= 0 {
-		maxPerMinute = 1000
-	}
+	maxPerMinute := effectiveRate(task.Threads, task.MaxPerMinute)
 	g.Log().Info(context.Background(), "task %d: initialize send rate - max %d emails per minute, threads: %d",
 		task.Id, maxPerMinute, task.Threads)
 	e.rateController = NewSimpleRateController(maxPerMinute)
@@ -1409,10 +1409,12 @@ func (e *TaskExecutor) isTaskComplete(ctx context.Context, taskId int) (bool, er
 
 	var result CountResult
 
+	// is_sent: 0 pending, 2 claimed, 1 finished (failures are written as 1 too, see the
+	// send result handler); there is no state 3 (#368)
 	err := g.DB().Transaction(ctx, func(ctx context.Context, tx gdb.TX) error {
 
 		err := tx.Model("recipient_info").
-			Fields("COUNT(1) as total_count, SUM(CASE WHEN is_sent IN (1, 3) THEN 1 ELSE 0 END) as sent_count").
+			Fields("COUNT(1) as total_count, SUM(CASE WHEN is_sent = 1 THEN 1 ELSE 0 END) as sent_count").
 			Where("task_id", taskId).
 			Scan(&result)
 		return err
@@ -1488,6 +1490,9 @@ func (e *TaskExecutor) UpdateTaskThreads(taskId int, threads int) error {
 	// calculate new rate limit - 20 emails per thread per second
 	targetSendPerThreadPerSecond := 20
 	newRate := newThreads * targetSendPerThreadPerSecond * 60
+	if e.taskConfig != nil {
+		newRate = effectiveRate(newThreads, e.taskConfig.MaxPerMinute)
+	}
 
 	// create new rate controller
 	e.rateController = NewSimpleRateController(newRate)
@@ -1563,4 +1568,17 @@ func (e *TaskExecutor) UpdateTaskThreads(taskId int, threads int) error {
 	}
 
 	return nil
+}
+
+// effectiveRate is the per-minute send limit: what the threads can push (20/s each),
+// lowered to the campaign's own cap when it has one (#362)
+func effectiveRate(threads, maxPerMinute int) int {
+	rate := threads * 20 * 60
+	if rate <= 0 {
+		rate = 1000
+	}
+	if maxPerMinute > 0 && maxPerMinute < rate {
+		rate = maxPerMinute
+	}
+	return rate
 }

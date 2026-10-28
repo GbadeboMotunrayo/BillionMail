@@ -240,14 +240,18 @@ const handleAdd = () => {
 	formModalApi.open()
 }
 
+// Send the same fields as the edit form; without local_part the API rejected
+// every toggle (#348)
 const handleStatusChange = async (row: MailBox, val: number) => {
 	await updateMailbox({
 		full_name: row.full_name,
+		local_part: row.local_part,
 		domain: row.domain,
 		password: row.password,
 		quota: row.quota,
 		isAdmin: row.is_admin,
 		active: val,
+		quota_active: row.quota_active,
 	})
 	row.active = val
 }

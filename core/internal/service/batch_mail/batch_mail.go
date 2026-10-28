@@ -25,15 +25,16 @@ var (
 )
 
 type CreateTaskArgs struct {
-	Addresser   string `json:"addresser"`   // Sender email address
-	Subject     string `json:"subject"`     // Email subject
-	FullName    string `json:"full_name"`   // FullName of Sender
-	TemplateId  int    `json:"template_id"` // Template ID
-	IsRecord    int    `json:"is_record"`   // Landing to outbox
-	Unsubscribe int    `json:"unsubscribe"` // Enable unsubscribe link
-	Threads     int    `json:"threads"`     // Number of threads to use
-	TrackOpen   int    `json:"track_open"`  // Track email opens
-	TrackClick  int    `json:"track_click"` // Track email clicks
+	Addresser    string `json:"addresser"`      // Sender email address
+	Subject      string `json:"subject"`        // Email subject
+	FullName     string `json:"full_name"`      // FullName of Sender
+	TemplateId   int    `json:"template_id"`    // Template ID
+	IsRecord     int    `json:"is_record"`      // Landing to outbox
+	Unsubscribe  int    `json:"unsubscribe"`    // Enable unsubscribe link
+	Threads      int    `json:"threads"`        // Number of threads to use
+	MaxPerMinute int    `json:"max_per_minute"` // Send rate cap, 0 = none
+	TrackOpen    int    `json:"track_open"`     // Track email opens
+	TrackClick   int    `json:"track_click"`    // Track email clicks
 	//Etypes      string `json:"etypes"`      // Email types (e.g., group IDs)
 	Remark    string `json:"remark"`     // Task remark
 	StartTime int    `json:"start_time"` // Scheduled start time
@@ -142,6 +143,7 @@ func CreateTask(ctx context.Context, args CreateTaskArgs) (int, error) {
 		"is_record":       args.IsRecord,
 		"unsubscribe":     args.Unsubscribe,
 		"threads":         args.Threads,
+		"max_per_minute":  args.MaxPerMinute,
 		//"etypes":          args.Etypes,
 		"track_open":  args.TrackOpen,
 		"track_click": args.TrackClick,
@@ -425,6 +427,7 @@ func CreateTaskWithRecipients(ctx context.Context, req *v1.CreateTaskReq, addTyp
 			"is_record":       req.IsRecord,
 			"unsubscribe":     req.Unsubscribe,
 			"threads":         req.Threads,
+			"max_per_minute":  req.MaxPerMinute,
 			"track_open":      req.TrackOpen,
 			"track_click":     req.TrackClick,
 			"start_time":      req.StartTime,

@@ -330,3 +330,27 @@ func TestBurstLimit_TenthOfRate(t *testing.T) {
 			"burst limit should be rate/10 for rate=%d", rate)
 	}
 }
+
+// 600/min is one token every 100ms. After the burst is used up, the next sends must be
+// spaced out, not released together (#362).
+func TestWait_EnforcesRateAfterBurst(t *testing.T) {
+	rc := NewSimpleRateController(600)
+	ctx := context.Background()
+
+	for i := 0; i < rc.burstLimit; i++ {
+		assert.NoError(t, rc.Wait(ctx))
+	}
+
+	start := time.Now()
+	for i := 0; i < 3; i++ {
+		assert.NoError(t, rc.Wait(ctx))
+	}
+	assert.GreaterOrEqual(t, time.Since(start), 250*time.Millisecond)
+}
+
+func TestEffectiveRate(t *testing.T) {
+	assert.Equal(t, 6000, effectiveRate(5, 0))
+	assert.Equal(t, 120, effectiveRate(5, 120))
+	assert.Equal(t, 6000, effectiveRate(5, 99999))
+	assert.Equal(t, 1000, effectiveRate(0, 0))
+}

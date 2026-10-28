@@ -218,8 +218,9 @@ func GenerateSPFRecord(ip string, host string, domain string) string {
 }
 
 func CheckRelayFirstSync(ctx context.Context) {
-	// Change the marker file and ensure the latest synchronization
-	markPath := public.AbsPath("../core/data/SMTP_relay_sync_config_mark2.pl")
+	// Change the marker file and ensure the latest synchronization.
+	// mark3: re-sync once after upgrade so every relay gets its own credentials file (#355)
+	markPath := public.AbsPath("../core/data/SMTP_relay_sync_config_mark3.pl")
 	if gfile.Exists(markPath) {
 		return
 	}
@@ -1009,7 +1010,7 @@ func truncateSmtpName(name string) string {
 		truncated = truncated[:maxSmtpServiceNameLength]
 	}
 
-	g.Log().Warningf(nil, "SMTP service name truncated from %d to %d chars: %s",
+	g.Log().Warningf(context.Background(), "SMTP service name truncated from %d to %d chars: %s",
 		len(name), len(truncated), truncated)
 	return truncated
 }

@@ -56,6 +56,10 @@ func (c *ControllerV1) AddMailForward(ctx context.Context, req *v1.AddMailForwar
 		res.SetError(gerror.New(public.LangCtx(ctx, "forward target address cannot be empty")))
 		return res, nil
 	}
+	if bad := mail_service.InvalidForwardUsers(forwardUsers); len(bad) > 0 {
+		res.SetError(gerror.Newf("%s: %s", public.LangCtx(ctx, "Invalid email address"), strings.Join(bad, ", ")))
+		return res, nil
+	}
 
 	now := time.Now().Unix()
 	insert_data := g.Map{

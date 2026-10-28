@@ -14,6 +14,8 @@ export const getMailboxList = (params: {
 
 type MailboxParams = {
 	full_name: string
+	local_part?: string
+	quota_active?: number
 	domain: string
 	password: string
 	active: number

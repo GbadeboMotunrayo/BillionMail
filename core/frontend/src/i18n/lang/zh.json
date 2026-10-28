@@ -334,6 +334,8 @@
 				"threads": "线程数",
 				"threadsAuto": "自动",
 				"threadsCustom": "自定义",
+				"maxPerMinute": "每分钟最多发送",
+				"maxPerMinutePlaceholder": "0 = 不限制",
 				"sendTime": "发送时间",
 				"sendTimeNow": "立即发送",
 				"sendTimeSchedule": "定时发送",

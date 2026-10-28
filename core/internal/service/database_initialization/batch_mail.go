@@ -250,6 +250,8 @@ func init() {
 
 		// email_tasks
 		_ = AddColumnIfNotExists("email_tasks", "sends_count", "INTEGER", "0", true)
+		// 0 = no cap beyond what the threads can push
+		_ = AddColumnIfNotExists("email_tasks", "max_per_minute", "INTEGER", "0", true)
 		_ = AddColumnIfNotExists("email_tasks", "delivered_count", "INTEGER", "0", true)
 		_ = AddColumnIfNotExists("email_tasks", "bounced_count", "INTEGER", "0", true)
 		_ = AddColumnIfNotExists("email_tasks", "deferred_count", "INTEGER", "0", true)

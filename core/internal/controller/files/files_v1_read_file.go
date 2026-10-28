@@ -2,13 +2,12 @@ package files
 
 import (
 	"context"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	"github.com/gogf/gf/v2/errors/gerror"
 
 	"billionmail-core/api/files/v1"
 )
 
 func (c *ControllerV1) ReadFile(ctx context.Context, req *v1.ReadFileReq) (res *v1.ReadFileRes, err error) {
 
-	return nil, status.Errorf(codes.Unimplemented, "Not yet achieved")
+	return nil, gerror.New("Not yet achieved")
 }

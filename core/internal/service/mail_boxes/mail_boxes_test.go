@@ -51,6 +51,16 @@ func TestPasswdDecodeInvalid(t *testing.T) {
 	}
 }
 
+func TestGenerateStrongPassword_MeetsPanelRule(t *testing.T) {
+	for i := 0; i < 200; i++ {
+		pw := GenerateStrongPassword(8)
+		assert.Len(t, pw, 8)
+		assert.Regexp(t, `[a-z]`, pw)
+		assert.Regexp(t, `[A-Z]`, pw)
+		assert.Regexp(t, `[0-9]`, pw)
+	}
+}
+
 func TestGenerateRandomPassword(t *testing.T) {
 	tests := []struct {
 		name    string

@@ -98,6 +98,11 @@
 									</n-input-number>
 								</div>
 							</n-form-item>
+							<n-form-item :label="$t('market.task.edit.maxPerMinute')" :show-feedback="false" class="mt-12px">
+								<n-input-number v-model:value="form.max_per_minute" class="w-160px" :min="0" :max="100000"
+									:placeholder="$t('market.task.edit.maxPerMinutePlaceholder')">
+								</n-input-number>
+							</n-form-item>
 						</n-card>
 						<n-card>
 							<n-form-item :label="t('market.task.edit.sendTime')" path="start_time">
@@ -206,6 +211,7 @@ const form = reactive({
 	unsubscribe: 1,
 	warmup: 0,
 	threads: 0,
+	max_per_minute: 0 as number | null,
 	start_time: null as number | null,
 	remark: '',
 	tag_ids: [] as number[],
@@ -385,6 +391,7 @@ const getParams = () => {
 		unsubscribe: form.unsubscribe,
 		warmup: form.warmup,
 		threads: form.threads,
+		max_per_minute: form.max_per_minute || 0,
 		start_time: startTime / 1000,
 		remark: form.remark,
 		tag_ids: form.tag_ids,
@@ -441,6 +448,7 @@ const initForm = async () => {
 		form.is_record = res.is_record
 		form.unsubscribe = res.unsubscribe
 		form.threads = res.threads
+		form.max_per_minute = res.max_per_minute ?? 0
 		threadsType.value = res.threads === 0 ? 0 : 1
 		form.remark = res.remark
 		form.tag_logic = res.tag_logic

@@ -3,10 +3,9 @@ package files
 import (
 	"billionmail-core/api/files/v1"
 	"context"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
+	"github.com/gogf/gf/v2/errors/gerror"
 )
 
 func (c *ControllerV1) DownloadFile(ctx context.Context, req *v1.DownloadFileReq) (res *v1.DownloadFileRes, err error) {
-	return nil, status.Errorf(codes.Unimplemented, "Not yet achieved")
+	return nil, gerror.New("Not yet achieved")
 }

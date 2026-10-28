@@ -1,7 +1,6 @@
 package domains
 
 import (
-	v2 "billionmail-core/api/dockerapi/v1"
 	v1 "billionmail-core/api/domains/v1"
 	mail_v1 "billionmail-core/api/mail_boxes/v1"
 	"billionmail-core/internal/consts"
@@ -367,7 +366,7 @@ func GetRelayDomains(ctx context.Context) (map[string]bool, error) {
 		SenderDomain string `json:"sender_domain"`
 	}
 	var mappings []mapping
-	err := g.DB().Model("bm_relay_domain_mapping rdm").
+	err := g.DB().Ctx(ctx).Model("bm_relay_domain_mapping rdm").
 		LeftJoin("bm_relay_config rc", "rc.id = rdm.relay_id").
 		Where("rc.active", 1).
 		Fields("rdm.sender_domain").
@@ -433,7 +432,7 @@ func FreshRecords(ctx context.Context, domain ...string) {
 		// retrieve A record
 		go func(d string) {
 			defer wg.Done()
-			dr, err := GetARecord(d, true, "")
+			dr, err := GetARecord(d, true, dedicatedOutboundIP(d))
 			if err != nil {
 				g.Log().Error(ctx, "Failed to get A record for domain %s: %v", d, err)
 			} else {
@@ -550,36 +549,21 @@ func getDKIMRecordWithKeySize(domain, selector string, keySize int, validateImme
 		mutex.Lock()
 		defer mutex.Unlock()
 
-		var res *v2.ExecResult
-		res, err = dk.ExecCommandByName(context.Background(), consts.SERVICES.Rspamd, []string{"rspamadm", "dkim_keygen", "-s", selector, "-b", fmt.Sprintf("%d", keySize), "-d", domain, "-k", fmt.Sprintf("/var/lib/rspamd/dkim/%s/%s.private", domain, selector)}, "root")
+		var generated bool
+		generated, err = generateDKIMKeyPair(dk, domain, selector, keySize)
 		if err != nil {
-			err = fmt.Errorf("Failed to generate DKIM key pair: %v", err)
 			return
 		}
 
-		if res != nil {
-			_, err = public.WriteFile(dkimPubPath, res.Output)
-			if err != nil {
-				err = fmt.Errorf("Failed to write DKIM public key: %v", err)
-				return
-			}
-		}
-
-		// update dkim private key file permission to 0644
-		err = os.Chmod(dkimPriPath, 0644)
-		if err != nil {
-			err = fmt.Errorf("Failed to change DKIM private key permissions: %v", err)
-			return
-		}
-
-		// Skip DKIM signing config for relay-mapped domains — relay provider signs
+		// Skip DKIM signing config for relay-mapped domains — relay provider signs.
+		// If we can't tell, leave the config alone: guessing "no relays" signs
+		// relay mail twice and breaks DKIM (#289, #370). Repair picks it up later.
 		relayDomains, relayErr := GetRelayDomains(context.Background())
 		if relayErr != nil {
-			g.Log().Warning(context.Background(), "Failed to check relay domains for DKIM signing:", relayErr)
-			relayDomains = make(map[string]bool)
+			g.Log().Warning(context.Background(), "Failed to check relay domains, not changing DKIM signing config:", relayErr)
 		}
 
-		if !relayDomains[domain] {
+		if generated && relayErr == nil && !relayDomains[domain] {
 			// build DKIM Sign config
 			signConf := fmt.Sprintf(`
 #%s_DKIM_BEGIN
@@ -714,7 +698,12 @@ func GetDMARCRecord(domain string, validateImmediate bool) (record v1.DNSRecord,
 
 // GetSPFRecord retrieves the SPF record for a given domain.
 func GetSPFRecord(domain string, validateImmediate bool) (record v1.DNSRecord, err error) {
-	serverIP, err := public.GetServerIP()
+	// Mail for a domain on a dedicated IP leaves from that IP, so SPF must name it,
+	// matching the A record shown next to it (#389)
+	serverIP := dedicatedOutboundIP(domain)
+	if serverIP == "" {
+		serverIP, err = public.GetServerIP()
+	}
 
 	if err != nil {
 		err = fmt.Errorf("Failed to get server IP: %v", err)
@@ -756,6 +745,17 @@ func GetMXRecord(domain string, validateImmediate bool) (record v1.DNSRecord, er
 	}
 
 	return
+}
+
+// dedicatedOutboundIP returns the active dedicated sending IP for a domain, or "".
+func dedicatedOutboundIP(domain string) string {
+	val, err := g.DB().Model("bm_multi_ip_domain").
+		Where("domain = ? AND active = 1", domain).
+		Value("outbound_ip")
+	if err != nil || val == nil {
+		return ""
+	}
+	return strings.TrimSpace(val.String())
 }
 
 // GetARecord retrieves the A record for a given domain.
@@ -844,7 +844,10 @@ func GetRecordsInCache(domain string, dedicatedIP string) (records v1.DNSRecords
 	// Get SPF record from cache
 	spfRecord := public.GetCache(buildCacheKey(domain, "SPF"))
 
-	if spfRecord != nil {
+	if dedicatedIP != "" {
+		// cached value may predate the dedicated IP
+		records.SPF, _ = GetSPFRecord(domain, false)
+	} else if spfRecord != nil {
 		if v, ok := spfRecord.(v1.DNSRecord); ok {
 			records.SPF = v
 		}
@@ -898,6 +901,41 @@ func GetRecordsInCache(domain string, dedicatedIP string) (records v1.DNSRecords
 	return
 }
 
+// generateDKIMKeyPair creates a selector's key pair with rspamd if it is missing.
+// It only writes key files; callers rebuild the signing config and restart rspamd once.
+// Callers must hold mutex.
+func generateDKIMKeyPair(dk *docker.DockerAPI, domain, selector string, keySize int) (generated bool, err error) {
+	dkimPath := public.AbsPath(filepath.Join(consts.RSPAMD_LIB_PATH, "dkim", domain))
+	dkimPriPath := filepath.Join(dkimPath, selector+".private")
+	dkimPubPath := filepath.Join(dkimPath, selector+".pub")
+
+	// re-check under the lock: another request may have just made them
+	if public.FileExists(dkimPriPath) && public.FileExists(dkimPubPath) {
+		return false, nil
+	}
+
+	if err = os.MkdirAll(dkimPath, 0755); err != nil {
+		return false, fmt.Errorf("Failed to create DKIM directory: %v", err)
+	}
+
+	res, err := dk.ExecCommandByName(context.Background(), consts.SERVICES.Rspamd, []string{"rspamadm", "dkim_keygen", "-s", selector, "-b", fmt.Sprintf("%d", keySize), "-d", domain, "-k", fmt.Sprintf("/var/lib/rspamd/dkim/%s/%s.private", domain, selector)}, "root")
+	if err != nil {
+		return false, fmt.Errorf("Failed to generate DKIM key pair: %v", err)
+	}
+
+	if res != nil {
+		if _, err = public.WriteFile(dkimPubPath, res.Output); err != nil {
+			return false, fmt.Errorf("Failed to write DKIM public key: %v", err)
+		}
+	}
+
+	if err = os.Chmod(dkimPriPath, 0644); err != nil {
+		return false, fmt.Errorf("Failed to change DKIM private key permissions: %v", err)
+	}
+
+	return true, nil
+}
+
 // RepairDKIMSigningConfig repairs the DKIM signing configuration file.
 func RepairDKIMSigningConfig(ctx context.Context) error {
 	g.Log().Debug(ctx, "Repairing DKIM signing config...")
@@ -911,12 +949,21 @@ func RepairDKIMSigningConfig(ctx context.Context) error {
 		return fmt.Errorf("failed to get all domains: %v", err)
 	}
 
-	// 1b. Get relay-mapped domains to exclude from DKIM signing
+	// 1b. Get relay-mapped domains to exclude from DKIM signing.
+	// Without that list we'd sign relay mail twice (#370), so keep the current config.
 	relayDomains, err := GetRelayDomains(ctx)
 	if err != nil {
-		g.Log().Warningf(ctx, "Failed to get relay domains, signing all: %v", err)
-		relayDomains = make(map[string]bool)
+		return fmt.Errorf("failed to get relay domains, DKIM signing config left unchanged: %v", err)
 	}
+
+	dk, err := docker.NewDockerAPI()
+	if err != nil {
+		return fmt.Errorf("failed to connect to Docker API: %v", err)
+	}
+	defer dk.Close()
+
+	mutex.Lock()
+	defer mutex.Unlock()
 
 	// 2. Build the full DKIM config content
 	var allSignConfBlocks strings.Builder
@@ -927,6 +974,7 @@ func RepairDKIMSigningConfig(ctx context.Context) error {
 			continue
 		}
 		// Regenerate missing DKIM key files
+		keysOK := true
 		for _, sel := range []struct {
 			name string
 			size int
@@ -934,8 +982,16 @@ func RepairDKIMSigningConfig(ctx context.Context) error {
 			keyPath := public.AbsPath(filepath.Join(consts.RSPAMD_LIB_PATH, "dkim", d.Domain, sel.name+".private"))
 			if !public.FileExists(keyPath) {
 				g.Log().Warningf(ctx, "DKIM key missing for %s/%s, regenerating", d.Domain, sel.name)
-				getDKIMRecordWithKeySize(d.Domain, sel.name, sel.size, false)
+				// key files only: rspamd restarts once at the end, not once per key (#372)
+				if _, genErr := generateDKIMKeyPair(dk, d.Domain, sel.name, sel.size); genErr != nil {
+					g.Log().Errorf(ctx, "Regenerating DKIM key %s/%s failed: %v", d.Domain, sel.name, genErr)
+					keysOK = false
+				}
 			}
+		}
+		if !keysOK {
+			// pointing rspamd at a missing key would break signing for this domain silently
+			continue
 		}
 		// For each domain, generate the correct config block with both selectors
 		signConf := fmt.Sprintf(`
@@ -973,8 +1029,12 @@ domain {
 		return fmt.Errorf("failed to write DKIM signing config: %v", err)
 	}
 
-	// 5. Ensure correct file permissions
-	err = filepath.Walk(filepath.Join(public.AbsPath(consts.RSPAMD_LIB_PATH), "dkim"), func(path string, info os.FileInfo, err error) error {
+	// 5. Ensure correct file permissions (the dir is missing on a clean first boot)
+	dkimRoot := filepath.Join(public.AbsPath(consts.RSPAMD_LIB_PATH), "dkim")
+	if err = os.MkdirAll(dkimRoot, 0755); err != nil {
+		return fmt.Errorf("failed to create DKIM directory: %v", err)
+	}
+	err = filepath.Walk(dkimRoot, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -991,12 +1051,6 @@ domain {
 	}
 
 	// 6. Restart rspamd service
-	dk, err := docker.NewDockerAPI()
-	if err != nil {
-		return fmt.Errorf("failed to connect to Docker API: %v", err)
-	}
-	defer dk.Close()
-
 	err = dk.RestartContainerByName(ctx, consts.SERVICES.Rspamd)
 	if err != nil {
 		return fmt.Errorf("failed to restart rspamd container: %v", err)

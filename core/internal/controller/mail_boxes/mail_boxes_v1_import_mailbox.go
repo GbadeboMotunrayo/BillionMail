@@ -31,7 +31,8 @@ func (c *ControllerV1) ImportMailbox(ctx context.Context, req *v1.ImportMailboxR
 	//}
 	//content := string(raw)
 
-	content := req.FileData
+	// Excel saves CSV with a byte-order mark, which hid the "username" header (#378)
+	content := strings.TrimPrefix(req.FileData, "\ufeff")
 
 	var mailboxes []v1.Mailbox
 	switch req.FileType {
@@ -54,8 +55,8 @@ func (c *ControllerV1) ImportMailbox(ctx context.Context, req *v1.ImportMailboxR
 				if i >= len(row) {
 					continue
 				}
-				switch col {
-				case "username":
+				switch strings.ToLower(strings.TrimSpace(col)) {
+				case "username", "email":
 					m.Username = row[i]
 				case "full_name":
 					m.FullName = row[i]
@@ -117,8 +118,11 @@ func (c *ControllerV1) ImportMailbox(ctx context.Context, req *v1.ImportMailboxR
 			}
 		}
 
-		if mailboxes[i].Password == "" {
-			mailboxes[i].Password = "123456"
+		mailboxes[i].Username = strings.TrimSpace(mailboxes[i].Username)
+
+		if mailboxes[i].Password == "" && mailboxes[i].PasswordEncode == "" {
+			// was a fixed "123456" for every imported mailbox
+			mailboxes[i].Password = mail_boxes.GenerateStrongPassword(12)
 		}
 
 		if mailboxes[i].IsAdmin == 0 {
@@ -139,7 +143,11 @@ func (c *ControllerV1) ImportMailbox(ctx context.Context, req *v1.ImportMailboxR
 	for _, m := range mailboxes {
 
 		if err := mail_boxes.AddImport(ctx, &m); err != nil {
-			failed = append(failed, m.Username)
+			name := m.Username
+			if name == "" {
+				name = "(empty username)"
+			}
+			failed = append(failed, fmt.Sprintf("%s: %v", name, err))
 			continue
 		}
 		successCount++

@@ -41,6 +41,10 @@ func (c *ControllerV1) EditMailForward(ctx context.Context, req *v1.EditMailForw
 			res.SetError(gerror.New(public.LangCtx(ctx, "forward target address cannot be empty")))
 			return res, nil
 		}
+		if bad := mail_service.InvalidForwardUsers(forwardUsers); len(bad) > 0 {
+			res.SetError(gerror.Newf("%s: %s", public.LangCtx(ctx, "Invalid email address"), strings.Join(bad, ", ")))
+			return res, nil
+		}
 
 		// add forward target to update parameters
 		update["goto"] = strings.Join(forwardUsers, ",")

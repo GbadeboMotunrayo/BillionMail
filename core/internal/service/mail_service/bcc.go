@@ -11,6 +11,7 @@ import (
 	"github.com/gogf/gf/v2/frame/g"
 	"github.com/gogf/gf/v2/os/gfile"
 	"github.com/gogf/gf/v2/text/gstr"
+	"net/mail"
 	"path"
 	"regexp"
 	"strings"
@@ -32,6 +33,18 @@ func ProcessForwardUsers(forwardUsers string) []string {
 	}
 
 	return result
+}
+
+// InvalidForwardUsers returns the addresses that are not valid email addresses.
+// The edit API used to validate the whole multi-line field as one address (#344).
+func InvalidForwardUsers(users []string) []string {
+	var bad []string
+	for _, u := range users {
+		if _, err := mail.ParseAddress(u); err != nil || !strings.Contains(u, "@") || strings.ContainsAny(u, " <>") {
+			bad = append(bad, u)
+		}
+	}
+	return bad
 }
 
 // SyncBccToPostfix  sync bcc to postfix

@@ -67,6 +67,9 @@ func (c *ControllerV1) UpdateTaskInfo(ctx context.Context, req *v1.UpdateTaskInf
 	if req.TemplateId > 0 {
 		updateData["template_id"] = req.TemplateId
 	}
+	if req.MaxPerMinute != nil {
+		updateData["max_per_minute"] = *req.MaxPerMinute
+	}
 	if req.Threads > 0 {
 		updateData["threads"] = req.Threads
 	}

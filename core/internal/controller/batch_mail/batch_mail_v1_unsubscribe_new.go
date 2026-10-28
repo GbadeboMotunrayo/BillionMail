@@ -100,8 +100,12 @@ func (c *ControllerV1) UnsubscribeNew(ctx context.Context, req *v1.UnsubscribeNe
 
 	var senderEmail string
 	if claims.TaskId > 0 {
-		val, _ := g.DB().Model("email_tasks").Where("id", claims.TaskId).Value("addresser")
-		senderEmail = val.String()
+		val, err := g.DB().Model("email_tasks").Where("id", claims.TaskId).Value("addresser")
+		if err != nil {
+			g.Log().Warningf(ctx, "Unsubscribe: sender lookup for task %d failed, using default base URL: %v", claims.TaskId, err)
+		} else {
+			senderEmail = val.String()
+		}
 	}
 	hostUrl := domains.GetBaseURLBySender(senderEmail)
 
