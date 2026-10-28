@@ -612,7 +612,8 @@ func (o *Overview) chartClickRate(campaignID int64, domain string, startTime, en
 ) as c`, "true")
 
 	query.Fields(xAxisField)
-	query.Fields("case when count(o.id) > 0 then round(1.0 * count(c.id) / count(o.id) * 100, 2) else 0.0 end as click_rate")
+	// clicks / delivered, the same definition the dashboard uses (#369)
+	query.Fields("case when coalesce(sum(case when status='sent' and dsn like '2.%' then 1 else 0 end), 0) > 0 then round(1.0 * count(c.id) / coalesce(sum(case when status='sent' and dsn like '2.%' then 1 else 0 end), 0) * 100, 2) else 0.0 end as click_rate")
 
 	query.Group("x")
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/gogf/gf/v2/frame/g"
 	"github.com/gogf/gf/v2/net/ghttp"
+	"html"
 	"image"
 	"image/color"
 	"image/png"
@@ -14,6 +15,14 @@ import (
 	"strings"
 	"time"
 )
+
+func leavingPage(target string) string {
+	safe := html.EscapeString(target)
+	return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+		`<title>Continue</title></head><body style="font-family:sans-serif;max-width:560px;margin:15vh auto;padding:0 16px">` +
+		`<p>This link goes to:</p><p style="word-break:break-all"><strong>` + safe + `</strong></p>` +
+		`<p><a href="` + safe + `" rel="noopener noreferrer">Continue</a></p></body></html>`
+}
 
 // CampaignEventHandler handle email campaign events
 func CampaignEventHandler(r *ghttp.Request, encStr string) {
@@ -25,7 +34,14 @@ func CampaignEventHandler(r *ghttp.Request, encStr string) {
 		CampaignId int    `json:"campaign_id" v:"required|min:1"`
 		Url        string `json:"url" v:"url"`
 	}{}
-	err := Decrypt(encStr, &data)
+	payload, signed, err := VerifyToken(encStr)
+	if err != nil {
+		g.Log().Warning(ctx, "Rejected tracking link with a bad signature")
+		r.Response.Write("Invalid -1")
+		return
+	}
+
+	err = Decrypt(payload, &data)
 	if err != nil {
 		r.Response.Write("Invalid -1")
 		return
@@ -125,8 +141,22 @@ func CampaignEventHandler(r *ghttp.Request, encStr string) {
 		// Update contact activity when link is clicked (user interaction)
 		contact_activity.UpdateActivityByEmailAndGroup(data.Recipient, groupId)
 
+		target, err := url.Parse(data.Url)
+		if err != nil || (target.Scheme != "http" && target.Scheme != "https") {
+			r.Response.Write("Invalid -3")
+			return
+		}
+
+		if !signed {
+			// Links from before signing can't be trusted to redirect on their own,
+			// or anyone could use this domain as an open redirect.
+			r.Response.Header().Set("Content-Type", "text/html; charset=utf-8")
+			r.Response.Write(leavingPage(target.String()))
+			return
+		}
+
 		// Redirect to the target URL
-		r.Response.RedirectTo(data.Url)
+		r.Response.RedirectTo(target.String())
 		return
 	}
 
@@ -186,7 +216,7 @@ func (t *MailTracker) GetTrackingURL(url string) string {
 		"url":         url,
 	}
 
-	return fmt.Sprintf("%s/%s", t.baseURL, Encrypt(data))
+	return fmt.Sprintf("%s/%s", t.baseURL, SignToken(Encrypt(data)))
 }
 
 // AppendTrackingPixel appends a tracking pixel to the email HTML
@@ -218,7 +248,7 @@ func (t *MailTracker) GetTrackingPixel() string {
 		"message_id":  t.messageID,
 	}
 
-	return fmt.Sprintf("%s/%s", t.baseURL, Encrypt(data))
+	return fmt.Sprintf("%s/%s", t.baseURL, SignToken(Encrypt(data)))
 }
 
 // IsModified checks if the HTML has been modified

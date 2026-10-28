@@ -5,7 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -522,22 +524,14 @@ func updatePostfixMasterCf(ctx context.Context, configs []*entity.BmRelayConfig)
 				params = append(params, fmt.Sprintf("-o smtp_helo_name=%s", heloName))
 			}
 
-			// Add corresponding TLS settings for different ports
-			if config.RelayPort == "465" {
-				params = append(params, "-o smtp_tls_wrappermode=yes")
-				params = append(params, "-o smtp_tls_security_level=encrypt")
-			} else if config.RelayPort == "587" {
-				params = append(params, "-o smtp_tls_security_level=encrypt")
-				params = append(params, "-o smtp_tls_wrappermode=no")
-			} else if config.RelayPort == "25" {
-				params = append(params, "-o smtp_tls_wrappermode=no")
-				params = append(params, "-o smtp_tls_security_level=none")
-				//params = append(params, "-o smtp_tls_security_level=may")
-			}
+			params = append(params, relayTLSParams(config)...)
 
 			// Add SASL authentication settings if auth user is provided
 			if config.AuthUser != "" {
 				params = append(params, "-o smtp_sasl_auth_enable=yes")
+				// Each relay reads only its own credentials, so relays on the same host
+				// (several Resend/SES accounts) can't pick up each other's login (#355)
+				params = append(params, fmt.Sprintf("-o smtp_sasl_password_maps=hash:%s", relayPasswdPathInContainer(config.Id)))
 				params = append(params, "-o smtp_sasl_security_options=noanonymous")
 				params = append(params, "-o smtp_sasl_mechanism_filter=login,plain,cram-md5")
 			}
@@ -615,6 +609,8 @@ func generateRelayPwdFiles(ctx context.Context, configs []*entity.BmRelayConfig)
 	}
 
 	var saslPasswdContent strings.Builder
+	keep := make(map[string]bool)
+	defer removeStaleRelayPasswdFiles(ctx, keep)
 
 	if len(configs) == 0 {
 		saslPasswdContent.WriteString("# No active relay configurations\n")
@@ -635,9 +631,16 @@ func generateRelayPwdFiles(ctx context.Context, configs []*entity.BmRelayConfig)
 				continue
 			}
 
-			saslPasswdContent.WriteString(fmt.Sprintf("[%s]:%s %s:%s\n",
-				config.RelayHost, config.RelayPort, config.AuthUser, decryptedPass))
+			entry := fmt.Sprintf("[%s]:%s %s:%s\n", config.RelayHost, config.RelayPort, config.AuthUser, decryptedPass)
+			saslPasswdContent.WriteString(entry)
 			hasAuthConfigs = true
+
+			relayPath := path.Join(postfixConfigDir, fmt.Sprintf(relayPasswdFilePattern, config.Id))
+			if err := gfile.PutContents(relayPath, entry); err != nil {
+				return gerror.Newf("Failed to write %s: %v", relayPath, err)
+			}
+			_ = os.Chmod(relayPath, 0600)
+			keep[relayPath] = true
 		}
 
 		if !hasAuthConfigs {
@@ -685,6 +688,7 @@ func reloadPostfixConfigs(ctx context.Context) error {
 		{"postmap", "/etc/postfix/conf/sender_relay_maps_primary"},
 		{"postmap", "/etc/postfix/conf/sasl_passwd_primary"},
 		{"postmap", "/etc/postfix/conf/sasl_passwd"},
+		{"sh", "-c", `for f in /etc/postfix/conf/sasl_passwd_relay_*; do case "$f" in *.db|*'*') ;; *) postmap "$f" ;; esac; done`},
 		{"postfix", "reload"},
 	}
 	// Execute commands
@@ -825,7 +829,7 @@ sender_dependent_default_transport_maps = pgsql:/etc/postfix/sql/pgsql_sender_tr
 			}
 			modified = true
 		}
-    
+
 	} else if hasConfigBlock {
 		// Remove the relay configuration block
 		content = content[:beginIndex] + content[endIndex+len(endMarker):]
@@ -939,7 +943,9 @@ func generateSmtpServiceName(config *entity.BmRelayConfig) string {
 	if config.SmtpName != "Custom SMTP Relay" {
 		// Prefer user-defined SMTP name
 		cleanedSmtpName := regexp.MustCompile(`[^a-zA-Z0-9]+`).ReplaceAllString(config.SmtpName, "_")
-		name := fmt.Sprintf("smtp_Custom_%s", cleanedSmtpName)
+		// The id keeps two relays that share a name (e.g. "Resend" per domain) from
+		// collapsing into one master.cf service with one set of credentials (#355)
+		name := fmt.Sprintf("smtp_Custom_%s_%d", strings.Trim(cleanedSmtpName, "_"), config.Id)
 		return truncateSmtpName(name)
 	}
 
@@ -1089,4 +1095,44 @@ func commentOutOldTransportMaps(content string) string {
 
 		return "# " + match + " # Migrated: replaced by automated config block"
 	})
+}
+
+// relayPasswdFilePattern names the per-relay SASL map, relative to postfixConfigDir
+const relayPasswdFilePattern = "/conf/sasl_passwd_relay_%d"
+
+func relayPasswdPathInContainer(id int) string {
+	return fmt.Sprintf("/etc/postfix/conf/sasl_passwd_relay_%d", id)
+}
+
+// removeStaleRelayPasswdFiles deletes credential files of relays that are gone or inactive
+func removeStaleRelayPasswdFiles(ctx context.Context, keep map[string]bool) {
+	files, err := filepath.Glob(path.Join(postfixConfigDir, "/conf/sasl_passwd_relay_*"))
+	if err != nil {
+		return
+	}
+
+	for _, f := range files {
+		if keep[strings.TrimSuffix(f, ".db")] {
+			continue
+		}
+		if err := os.Remove(f); err != nil {
+			g.Log().Warningf(ctx, "Failed to remove stale relay credentials %s: %v", f, err)
+		}
+	}
+}
+
+// relayTLSParams picks TLS settings from the relay port.
+// Implicit TLS on 465 and variants like 2465; STARTTLS everywhere else, required when
+// we send a password so credentials never cross the wire in plain text (#156, #379).
+func relayTLSParams(config *entity.BmRelayConfig) []string {
+	if public.IsImplicitTLSPort(config.RelayPort) {
+		return []string{"-o smtp_tls_wrappermode=yes", "-o smtp_tls_security_level=encrypt"}
+	}
+
+	level := "may"
+	if config.AuthUser != "" && config.AuthMethod != "NONE" && config.RelayPort != "25" {
+		level = "encrypt"
+	}
+
+	return []string{"-o smtp_tls_wrappermode=no", "-o smtp_tls_security_level=" + level}
 }

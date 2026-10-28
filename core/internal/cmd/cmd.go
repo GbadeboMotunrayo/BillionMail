@@ -82,6 +82,31 @@ func configuredWebBasePath() string {
 	return ""
 }
 
+// publicRoutePrefixes are served to anyone, even when SafePath hides the admin panel.
+var publicRoutePrefixes = []string{
+	"/pmta/",
+	"/roundcube/",
+	"/.well-known/acme-challenge/",
+}
+
+func isPublicRoute(p string) bool {
+	if strings.Contains(p, "..") {
+		return false
+	}
+
+	if p == "/roundcube" || p == "/landing/video" {
+		return true
+	}
+
+	for _, prefix := range publicRoutePrefixes {
+		if strings.HasPrefix(p, prefix) {
+			return true
+		}
+	}
+
+	return false
+}
+
 func webBaseRoot(basePath string) string {
 	if basePath == "" {
 		return "/"
@@ -245,6 +270,12 @@ var (
 
 						// check if the request is in the excluded URIs
 						if _, ok := excludesURIs[r.URL.Path]; ok {
+							return
+						}
+
+						// Public routes: tracking pixels/links in sent mail, webmail (it has its own login),
+						// certificate challenges and video landing pages (#338, #345, #361, #364, #381)
+						if isPublicRoute(r.URL.Path) {
 							return
 						}
 

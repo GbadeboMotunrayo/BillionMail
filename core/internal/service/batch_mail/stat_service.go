@@ -365,10 +365,17 @@ func (s *TaskStatService) getTaskMailProviders(taskId int64, domain string, star
 		if sends > 0 {
 			provider["delivery_rate"] = public.Round(float64(delivered)/float64(sends)*100, 2)
 			provider["bounce_rate"] = public.Round(float64(result["bounced"].Int())/float64(sends)*100, 2)
+		} else {
+			provider["delivery_rate"] = 0.0
+			provider["bounce_rate"] = 0.0
 		}
+		// Always present: an all-bounced provider is exactly what people come to diagnose (#373)
 		if delivered > 0 {
 			provider["open_rate"] = public.Round(float64(result["opened"].Int())/float64(delivered)*100, 2)
 			provider["click_rate"] = public.Round(float64(result["clicked"].Int())/float64(delivered)*100, 2)
+		} else {
+			provider["open_rate"] = 0.0
+			provider["click_rate"] = 0.0
 		}
 		providers = append(providers, provider)
 	}

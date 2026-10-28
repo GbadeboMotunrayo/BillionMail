@@ -17,7 +17,7 @@ func TestGenerateSmtpServiceName(t *testing.T) {
 		{
 			"custom smtp name",
 			&entity.BmRelayConfig{Id: 1, SmtpName: "My Relay", RelayHost: "smtp.example.com"},
-			"smtp_Custom_My_Relay",
+			"smtp_Custom_My_Relay_1",
 		},
 		{
 			"relay with auth user containing @",
@@ -42,7 +42,12 @@ func TestGenerateSmtpServiceName(t *testing.T) {
 		{
 			"special chars in name",
 			&entity.BmRelayConfig{Id: 1, SmtpName: "My !@# Relay", RelayHost: "smtp.example.com"},
-			"smtp_Custom_My_Relay",
+			"smtp_Custom_My_Relay_1",
+		},
+		{
+			"same name on two relays stays distinct",
+			&entity.BmRelayConfig{Id: 9, SmtpName: "Resend", RelayHost: "smtp.resend.com"},
+			"smtp_Custom_Resend_9",
 		},
 	}
 	for _, tt := range tests {
@@ -136,4 +141,27 @@ func TestEnsureSmtpsConfigInMasterCf(t *testing.T) {
 		assert.True(t, modified)
 		assert.Contains(t, result, markerBegin)
 	})
+}
+
+func TestRelayTLSParams(t *testing.T) {
+	tests := []struct {
+		name   string
+		config *entity.BmRelayConfig
+		want   string
+	}{
+		{"implicit 465", &entity.BmRelayConfig{RelayPort: "465", AuthUser: "u"}, "wrappermode=yes|level=encrypt"},
+		{"implicit 2465", &entity.BmRelayConfig{RelayPort: "2465", AuthUser: "u"}, "wrappermode=yes|level=encrypt"},
+		{"starttls 587 with auth", &entity.BmRelayConfig{RelayPort: "587", AuthUser: "u"}, "wrappermode=no|level=encrypt"},
+		{"starttls 2525 with auth", &entity.BmRelayConfig{RelayPort: "2525", AuthUser: "u"}, "wrappermode=no|level=encrypt"},
+		{"ip-auth relay", &entity.BmRelayConfig{RelayPort: "587", AuthMethod: "NONE"}, "wrappermode=no|level=may"},
+		{"port 25", &entity.BmRelayConfig{RelayPort: "25", AuthUser: "u"}, "wrappermode=no|level=may"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := strings.Join(relayTLSParams(tt.config), " ")
+			for _, part := range strings.Split(tt.want, "|") {
+				assert.Contains(t, got, part)
+			}
+		})
+	}
 }

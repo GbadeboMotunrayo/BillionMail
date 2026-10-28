@@ -1,14 +1,81 @@
 package maillog_stat
 
 import (
+	"billionmail-core/internal/service/public"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/gogf/gf/util/grand"
+	"github.com/gogf/gf/v2/frame/g"
 	"strings"
+	"sync"
 )
+
+// Tracking tokens carry their own AES key and IV, so the encryption alone
+// proves nothing: anyone can mint a token that decrypts (see #390).
+// SignToken appends an HMAC made with a per-install secret so the tracker can
+// tell genuine links from forged ones.
+
+var (
+	trackingKey     []byte
+	trackingKeyOnce sync.Once
+
+	ErrBadTrackingSignature = errors.New("invalid tracking signature")
+)
+
+func trackingSecret() []byte {
+	trackingKeyOnce.Do(func() {
+		secret := ""
+		for _, name := range []string{"DBPASS", "REDISPASS"} {
+			if v, err := public.DockerEnv(name); err == nil {
+				secret += v
+			}
+		}
+
+		if secret == "" {
+			// No install secrets (tests, dev runs): links only verify for this process.
+			g.Log().Warning(context.Background(), "No DBPASS/REDISPASS found, tracking links are signed with a temporary key")
+			secret = string(grand.B(32))
+		}
+
+		sum := sha256.Sum256([]byte("billionmail-tracking|" + secret))
+		trackingKey = sum[:]
+	})
+
+	return trackingKey
+}
+
+func tokenMAC(token string) string {
+	mac := hmac.New(sha256.New, trackingSecret())
+	mac.Write([]byte(token))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:16])
+}
+
+// SignToken returns token.signature
+func SignToken(token string) string {
+	return token + "." + tokenMAC(token)
+}
+
+// VerifyToken splits a tracking token into its payload and reports whether it was signed.
+// Unsigned tokens come from emails sent before signing existed.
+func VerifyToken(full string) (payload string, signed bool, err error) {
+	payload, sig, found := strings.Cut(full, ".")
+	if !found {
+		return payload, false, nil
+	}
+
+	if !hmac.Equal([]byte(sig), []byte(tokenMAC(payload))) {
+		return "", false, ErrBadTrackingSignature
+	}
+
+	return payload, true, nil
+}
 
 func Encrypt(data interface{}) string {
 	dataJSON, _ := json.Marshal(data)
@@ -40,6 +107,9 @@ func Encrypt(data interface{}) string {
 }
 
 func Decrypt(data string, result interface{}) (err error) {
+	// Ignore a signature suffix; callers that need authenticity use VerifyToken first.
+	data, _, _ = strings.Cut(data, ".")
+
 	dataLength := len(data)
 	amountToPad := 4 - (dataLength % 4)
 	if amountToPad > 0 && amountToPad < 4 {

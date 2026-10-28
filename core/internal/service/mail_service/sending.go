@@ -16,6 +16,7 @@ import (
 	"mime/quotedprintable"
 	"net"
 	"net/smtp"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -205,7 +206,7 @@ func (e *EmailSender) Connect() error {
 
 // connectWithSSL establishes a secure SMTP connection
 func (e *EmailSender) connectWithSSL() error {
-	conn, err := tls.Dial("tcp", net.JoinHostPort(e.Host, e.Port), &tls.Config{
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: smtpDialTimeout}, "tcp", net.JoinHostPort(e.Host, e.Port), &tls.Config{
 		MinVersion:         tls.VersionTLS12,
 		InsecureSkipVerify: true,
 		ServerName:         e.SNI,
@@ -213,6 +214,9 @@ func (e *EmailSender) connectWithSSL() error {
 	if err != nil {
 		return fmt.Errorf("TLS dial: %w", err)
 	}
+
+	// Bound the greeting and auth so a wrong port fails fast instead of hanging (#379)
+	_ = conn.SetDeadline(time.Now().Add(smtpHandshakeTimeout))
 
 	client, err := smtp.NewClient(conn, e.Host)
 	if err != nil {
@@ -226,6 +230,7 @@ func (e *EmailSender) connectWithSSL() error {
 		return fmt.Errorf("SMTP auth: %w", err)
 	}
 
+	_ = conn.SetDeadline(time.Time{})
 	e.client = client
 
 	return nil
@@ -233,13 +238,26 @@ func (e *EmailSender) connectWithSSL() error {
 
 // connectPlain establishes a plain SMTP connection
 func (e *EmailSender) connectPlain() error {
-	client, err := smtp.Dial(net.JoinHostPort(e.Host, e.Port))
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(e.Host, e.Port), smtpDialTimeout)
 	if err != nil {
 		return fmt.Errorf("SMTP dial: %w", err)
 	}
 
-	// Check if STARTTLS is needed
-	if e.Port == "587" {
+	// Bound the greeting and auth so a TLS-only port fails fast instead of hanging (#379)
+	_ = conn.SetDeadline(time.Now().Add(smtpHandshakeTimeout))
+
+	client, err := smtp.NewClient(conn, e.Host)
+	if err != nil {
+		conn.Close()
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return fmt.Errorf("SMTP greeting timed out on port %s: if this port uses SSL/TLS from the start, use 465 or a port ending in 465", e.Port)
+		}
+		return fmt.Errorf("SMTP dial: %w", err)
+	}
+
+	// Upgrade to TLS whenever the server offers it, not only on 587,
+	// so ports like 2525/2587 don't send credentials in plain text
+	if ok, _ := client.Extension("STARTTLS"); ok || e.Port == "587" {
 		if err = client.StartTLS(&tls.Config{
 			MinVersion:         tls.VersionTLS12,
 			InsecureSkipVerify: true,
@@ -263,6 +281,7 @@ func (e *EmailSender) connectPlain() error {
 		return fmt.Errorf("SMTP auth: %w", err)
 	}
 
+	_ = conn.SetDeadline(time.Time{})
 	e.client = client
 	return nil
 }
@@ -447,14 +466,14 @@ func (e *EmailSender) isSecure() bool {
 	// usually,
 	// port 465 is used for SMTP with SSL (implicit TLS)
 	// port 587 is used for SMTP with STARTTLS (explicit TLS)
-	if e.Port == "465" {
-		return true
-	} else if e.Port == "587" {
-		// We will use STARTTLS if the port is 587
-		return false
-	}
-	return false
+	// some providers publish implicit TLS on variants such as 2465
+	return public.IsImplicitTLSPort(e.Port)
 }
+
+const (
+	smtpDialTimeout      = 15 * time.Second
+	smtpHandshakeTimeout = 30 * time.Second
+)
 
 // IsConfigured check if Email notification is configured
 func (e *EmailSender) IsConfigured() bool {
